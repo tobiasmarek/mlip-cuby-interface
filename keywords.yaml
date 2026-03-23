@@ -1,0 +1,85 @@
+################################################################################
+# KEYWORDS for the MLIP interface
+################################################################################
+
+keywords:
+  :mlip_backend: !ruby/object:SettingsKeyword
+    convert_to: :string
+    when_not_present: :die
+    default_value: :none
+    allowed_values:
+      - :none
+      - :torchmd
+      - :fairchem
+      - :fennol
+      - :mace
+      - :orbital
+      - :mlatom
+      - :so3lr
+      - :nequip
+      - :aimnet
+  #: MLIP backend to use
+
+  :mlip_model: !ruby/object:SettingsKeyword
+    convert_to: :string
+    when_not_present: :default
+    default_value: ""
+  #: Model name or file with the model (.ckpt, pt2, pt, ...)
+
+  :mlip_device: !ruby/object:SettingsKeyword
+    convert_to: :string
+    when_not_present: :default
+    default_value: "cuda"
+  #: Device selector for the worker ("cpu", "cuda", "cuda:1", "auto")
+
+  :mlip_cpu_threads: !ruby/object:SettingsKeyword
+    convert_to: :integer
+    when_not_present: :default
+    default_value: 0
+    devel: true
+  #: Limit CPU threads used by torch-backed workers (0 = default)
+
+  :mlip_cuda_memory_fraction: !ruby/object:SettingsKeyword
+    convert_to: :float
+    when_not_present: :default
+    default_value: 0.0
+    devel: true
+  #: Per-process CUDA memory fraction in (0,1]; 0 disables the limit
+
+  :mlip_multiplier: !ruby/object:SettingsKeyword
+    convert_to: :float
+    when_not_present: :default
+    default_value: 1.0
+    devel: true
+  #: Multiplier for the predicted energies and forces.
+
+  :mlip_sp_only: !ruby/object:SettingsKeyword
+    convert_to: :boolean
+    when_not_present: :default
+    default_value: false
+    devel: true
+  #: Load the model so that it supports only single-point energies
+
+  :mlip_set_atom_to_zero: !ruby/object:SettingsKeyword
+    convert_to: :boolean
+    when_not_present: :default
+    default_value: false
+    devel: true
+  #: Set energy of a free atom to 0 instead of calculating it
+
+#  :mlip_enforce_cpu: !ruby/object:SettingsKeyword
+#    convert_to: :boolean
+#    when_not_present: :default
+#    default_value: false
+#  #: Enforce the use of CPU only. By default, CUDA is used when available.
+#  #: When active, the 'parallel' kayword controls the number of threads used.
+
+  :mlip_server: !ruby/object:SettingsKeyword
+    convert_to: :string
+    when_not_present: :default
+    default_value: "http"
+    allowed_values:
+      - "http"
+      - "zmq"
+  #: Supported transport protocols for MLIP workers: "http" or "zmq"
+
