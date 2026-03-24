@@ -1,15 +1,5 @@
 """A collection of MLIP worker implementations for different backends."""
 
-# GUIDE:
-# - Each worker class should inherit from MLIPWorker and implement the load() and calculate() methods.
-# - The load() method should handle loading the model and preparing it for inference.
-# - The calculate() method should take an XYZ string, a gradients flag, and an optional charge, and return a dictionary with "energy" and optionally "forces".
-# - Use the resolve_torch_device and apply_torch_limits static methods from MLIPWorker for PyTorch-based workers to handle device selection and resource limits.
-# - Ensure that all workers return energy in kcal/mol and forces in kcal/mol/Å for consistency. Use ase.units for unit conversions if needed.
-#
-# - Add import to mlip_worker_server.py and register the worker class in the WORKER_CLASSES dictionary
-# - Add the worker name to keywords.yaml
-
 import abc
 import io
 from typing import Any, Dict, Optional, Tuple
@@ -256,9 +246,11 @@ class AimnetWorker(MLIPWorker):
 #  - FIXME: doesn't work with zmq, maybe due to the fact that zmq handles
 #    limiting cpu threads badly, or charge cache handling
 #
-# Notes: WARNING:root:If 'dataset_list' is provided in the config, the code
+# Notes:
+#  - WARNING:root:If 'dataset_list' is provided in the config, the code
 #   assumes that each dataset maps to itself. Please use 'dataset_mapping' as
 #  'dataset_list' is deprecated and will be removed in the future.
+#  - Needs HuggingFace token to get the models (`hf auth login`)
 #
 ################################################################################
 
@@ -486,6 +478,7 @@ class OrbitalWorker(MLIPWorker):
 #
 # Notes:
 # - FIXME: Fails to converge for some structures thx to semiempirics
+# - Needs Aitomic addon for AIQM3 access
 #
 ################################################################################
 
