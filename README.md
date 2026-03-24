@@ -11,6 +11,19 @@ conda env create -f mlip/envs/fairchem.yaml # e.g. for UMA models
 cuby4 /path/to/your/template.yaml # with `interface: mlip`
 ```
 
+Example of `template.yaml`:
+```yaml
+# conda activate fairchem
+job: dataset
+dataset: PLA15
+
+interface: mlip
+method: mlip
+mlip_backend: fairchem
+mlip_model: uma-s-1p2
+mlip_device: cpu
+```
+
 ## Supported backends
 
 | Backend  | Models                 | Status                      |
