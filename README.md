@@ -8,6 +8,7 @@ This directory provides a **unified Cuby4 interface for multiple MLIP backends**
 cd $CUBY_DIR/interfaces/
 git clone git@github.com:tobiasmarek/mlip-cuby-interface.git mlip # clone as `mlip`
 conda env create -f mlip/envs/fairchem.yaml # e.g. for UMA models
+conda activate fairchem
 cuby4 /path/to/your/template.yaml # with `interface: mlip`
 ```
 
