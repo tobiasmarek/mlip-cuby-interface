@@ -1,25 +1,40 @@
 # Unified MLIP Interface
 
-This directory contains a unified Cuby4 interface for multiple MLIP backends with a persistent worker process.
+This directory provides a **unified Cuby4 interface for multiple MLIP backends** using a persistent worker process.
 
 ## Usage
 
 ```bash
 cd $CUBY_DIR/interfaces/
-git clone git@github.com:tobiasmarek/mlip-cuby-interface.git mlip # clone as `mlip` directory
-conda env create -f mlip/envs/fairchem.yaml # for UMA models
-cuby4 template.yaml
+git clone git@github.com:tobiasmarek/mlip-cuby-interface.git mlip # clone as `mlip`
+conda env create -f mlip/envs/fairchem.yaml # e.g. for UMA models
+cuby4 /path/to/your/template.yaml # with `interface: mlip`
 ```
 
-## What Was Built
+## Supported backends
 
-- A single Ruby interface: `mlip.rb`
-- A persistent Python worker server: `mlip_worker_server.py`
-- A persistent Python bridge between Ruby and worker transport: `mlip_bridge_client.py`
-- A Python transport client module (used by the bridge): `mlip_client.py`
-- Interface keywords: `keywords.yaml`
+| Backend  | Models                 | Status                      |
+|----------|------------------------|-----------------------------|
+| aimnet   | AIMNet2(2025)          | :white_check_mark: working  |
+| fairchem | UMA models             | :white_check_mark: working  |
+| fennol   | FeNNix-BIO1 models     | :white_check_mark: working  |
+| mace     | MACE-POLAR-1 models    | :white_check_mark: working  |
+| mlatom   | AIQM2, AIQM3           | :x: failing                 |
+| nequip   | NequIP, Allegro models | :white_check_mark: working  |
+| orbital  | ORB-V3 series          | :white_check_mark: working  |
+| so3lr    | SO3LR                  | :warning: untested          |
+| torchmd  | PM6-ML                 | :white_check_mark: working  |
 
-## Main Idea
+## Files
+
+- `mlip.rb` – main Ruby interface
+- `mlip_workers.py` – definitions of MLIP backends
+- `mlip_worker_server.py` – persistent Python worker server
+- `mlip_bridge_client.py` – bridge between Ruby and the worker transport
+- `mlip_client.py` – Python transport client used by the bridge
+- `keywords.yaml` – interface keywords
+
+## How it works
 
 The model is loaded once and kept alive in a Python worker process.
 
@@ -31,26 +46,11 @@ Ruby (`mlip.rb`) acts only as a manager:
 4. Read results and convert them to Cuby `Results`.
 5. Shut everything down cleanly.
 
-## Backends
-
-Supported backend names:
-
-- `torchmd`
-- `fairchem`
-- `fennol`
-
-Backend selection:
-
-- Explicit: `mlip_model: "torchmd::/path/model.ckpt"`
-- Automatic by extension:
-  - `.fnx` -> `fennol`
-  - `.pt` -> `fairchem`
-  - otherwise -> `torchmd`
-
 ## Keywords
 
-Defined in `keywords.yaml`:
+Defined in [`keywords.yaml`](keywords.yaml):
 
+- `mlip_backend`
 - `mlip_model`
 - `mlip_device`
 - `mlip_cpu_threads`
@@ -58,3 +58,20 @@ Defined in `keywords.yaml`:
 - `mlip_multiplier`
 - `mlip_sp_only`
 - `mlip_set_atom_to_zero`
+- `mlip_server`
+
+## Adding a new backend
+
+1) Within [`mlip_workers.py`](mlip_workers.py) define a new child class of the MLIPWorker abstract class
+
+2) Implement the *load* method which handles the loading of the model and preparing it for inference
+
+3) Implement the *calculate* method which takes an XYZ string, a gradients flag, and an optional charge, and returns a dictionary with "energy" and optionally "forces"
+
+4) Use the *resolve_torch_device* and *apply_torch_limits* static methods from MLIPWorker for PyTorch-based workers to handle device selection and resource limits
+
+5) Ensure that all workers return energy in *kcal/mol* and forces in *kcal/mol/Å* for consistency, use ase.units for unit conversions if needed
+
+6) Add import to [`mlip_worker_server.py`](mlip_worker_server.py) and register the worker class in the WORKER_CLASSES dictionary
+
+7) Add the worker name to keywords.yaml
