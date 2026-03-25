@@ -92,4 +92,3 @@ dependencies:
       - treescope==0.1.10
       - typing-extensions==4.15.0
       - zipp==3.23.0
-prefix: /home/tobiasma/miniconda3/envs/fennol
