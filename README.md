@@ -1,6 +1,6 @@
 # Unified MLIP Interface
 
-This directory provides a **unified Cuby4 interface for multiple MLIP backends** using a persistent worker process.
+This directory provides a **unified Cuby4 interface for multiple MLIP backends** using a persistent worker process. Working [Cuby4](http://cuby4.molecular.cz/) software is required.
 
 ## Usage
 
@@ -23,11 +23,13 @@ method: mlip
 mlip_backend: fairchem
 mlip_model: uma-s-1p2
 mlip_device: cpu
+mlip_cpu_threads: 8
+# more within `keywords.yaml`
 ```
 
 ## Supported backends
 
-| Backend  | Models                 | Status                      |
+| Backend  | Models tested          | Status                      |
 |----------|------------------------|-----------------------------|
 | aimnet   | AIMNet2(2025)          | :white_check_mark: working  |
 | fairchem | UMA models             | :white_check_mark: working  |
@@ -59,20 +61,6 @@ Ruby (`mlip.rb`) acts only as a manager:
 3. Send structures for repeated calculations.
 4. Read results and convert them to Cuby `Results`.
 5. Shut everything down cleanly.
-
-## Keywords
-
-Defined in [`keywords.yaml`](keywords.yaml):
-
-- `mlip_backend`
-- `mlip_model`
-- `mlip_device`
-- `mlip_cpu_threads`
-- `mlip_cuda_memory_fraction`
-- `mlip_multiplier`
-- `mlip_sp_only`
-- `mlip_set_atom_to_zero`
-- `mlip_server`
 
 ## Adding a new backend
 
