@@ -169,7 +169,7 @@ module InterfaceMlip
 		end
 
 		if line.nil?
-			Cuby::error "MLIP bridge terminated unexpectedly"
+			Cuby::error "MLIP bridge terminated unexpectedly (worker exited, no JSON response)"
 		end
 
 		out = JSON.parse(line)
