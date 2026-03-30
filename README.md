@@ -2,6 +2,9 @@
 
 This directory provides a **unified Cuby4 interface for multiple MLIP backends** using a persistent worker process. Working [Cuby4](http://cuby4.molecular.cz/) software is required.
 
+> [!NOTE]  
+> This repository is under active development.
+
 ## Usage
 
 ```bash
