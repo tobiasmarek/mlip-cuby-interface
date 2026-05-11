@@ -60,7 +60,7 @@ module InterfaceMlip
 		@@mlip_port = mlip_find_free_port(8000, 100)
 
 		begin
-			@@mlip_worker_id = Process.spawn(*mlip_worker_command)
+			@@mlip_worker_id = Process.spawn(mlip_worker_env, *mlip_worker_command)
 			mlip_start_bridge
 			mlip_wait_for_worker
 		rescue
@@ -114,6 +114,10 @@ module InterfaceMlip
 
 		cuda_fraction = @settings[:mlip_cuda_memory_fraction].to_f
 		command += ["--cuda-memory-fraction", cuda_fraction.to_s] if cuda_fraction > 0.0
+
+		if @settings[:verbosity].to_s.strip == "debug"
+			puts "MLIP worker command: #{command.join(' ')}" 
+		end
 
 		command
 	end
@@ -238,6 +242,23 @@ module InterfaceMlip
 		unless status.success?
 			Cuby::error "Missing Python module '#{mod_name}' for transport '#{@mlip_transport}'. Install it with: python3 -m pip install ..."
 		end
+	end
+
+	def mlip_worker_env
+		threads = @settings[:mlip_cpu_threads].to_i
+		return {} if threads <= 0
+
+		t = threads.to_s
+
+		{
+			"OMP_NUM_THREADS"        => t,
+			"MKL_NUM_THREADS"        => t,
+			"OPENBLAS_NUM_THREADS"   => t,
+			"NUMEXPR_NUM_THREADS"    => t,
+			"VECLIB_MAXIMUM_THREADS" => t,
+			"OMP_PROC_BIND"          => "TRUE",
+			"OMP_PLACES"             => "cores",
+		}
 	end
 
 	#=======================================================================
