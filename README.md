@@ -4,6 +4,7 @@ This directory provides a **unified Cuby4 interface for multiple MLIP backends**
 
 > [!NOTE]  
 > This repository is under active development.
+> Look into [`tldr.md`](tldr.md)
 
 ## Usage
 
