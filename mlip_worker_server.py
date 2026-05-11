@@ -6,11 +6,12 @@ import abc
 import argparse
 import json
 import os
+import resource
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
 
-from mlip_workers import (
+from mlip_workers import ( # TODO: Import dynamically
     MLIPWorker,
     TorchMDNetWorker,
     FairchemWorker,
@@ -23,8 +24,8 @@ from mlip_workers import (
     AimnetWorker,
 )
 
-WORKER_CLASSES = {
-    "torchmdnet": TorchMDNetWorker,
+WORKER_CLASSES = { # TODO: Build dynamically
+    "torchmd": TorchMDNetWorker,
     "fairchem": FairchemWorker,
     "fennol": FennolWorker,
     "mace": MACEWorker,
@@ -170,9 +171,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--cpu-threads", type=int, default=0)
+    parser.add_argument("--memory-limit-gb", type=float, default=0, help="Limit total memory usage to this many GB")
     parser.add_argument("--cuda-memory-fraction", type=float, default=None)
     parser.add_argument("--sp-only", action="store_true", help="Load model without gradients when supported")
     return parser.parse_args()
+
+
+def apply_cpu_affinity(cpu_threads: int) -> None:
+    if cpu_threads <= 0:
+        return
+    if not hasattr(os, "sched_getaffinity") or not hasattr(os, "sched_setaffinity"):
+        return
+
+    allowed = sorted(os.sched_getaffinity(0))
+    if not allowed:
+        return
+
+    keep = set(allowed[:min(cpu_threads, len(allowed))])
+    os.sched_setaffinity(0, keep)
+
+
+def apply_memory_limit_gb(limit_gb: float | None) -> None:
+    if not limit_gb or limit_gb <= 0:
+        return
+    limit_bytes = int(limit_gb * 1024**3)
+    resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, limit_bytes))
 
 
 def validate_and_prepare(args: argparse.Namespace) -> None:
@@ -191,6 +214,8 @@ def validate_and_prepare(args: argparse.Namespace) -> None:
 
 def main() -> int:
     args = parse_args()
+    apply_cpu_affinity(args.cpu_threads)
+    apply_memory_limit_gb(args.memory_limit_gb)
     validate_and_prepare(args)
 
     worker = build_worker(
