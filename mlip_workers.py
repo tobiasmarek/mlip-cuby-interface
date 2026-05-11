@@ -2,6 +2,9 @@
 
 import abc
 import io
+import faulthandler, sys
+faulthandler.enable(file=sys.stderr, all_threads=True)
+
 from typing import Any, Dict, Optional, Tuple
 
 
@@ -36,6 +39,10 @@ class MLIPWorker(abc.ABC):
     def calculate(self, xyz: str, gradients: bool, charge: int) -> Dict[str, Any]:
         """Calculate energy and optional forces for one XYZ structure."""
 
+
+class TorchBackedMLIPWorker(MLIPWorker):
+    """Shared runtime setup for workers that use PyTorch directly."""
+
     @staticmethod
     def resolve_torch_device(torch_module: Any, requested: str) -> str:
         """Resolve the runtime device for a PyTorch-based worker."""
@@ -48,7 +55,7 @@ class MLIPWorker(abc.ABC):
             return "cuda:0"
         return requested
 
-    @staticmethod # FIXME: Maybe not neccesary because python has already been started
+    @staticmethod
     def apply_torch_limits(torch_module: Any, cpu_threads: int, cuda_memory_fraction: Optional[float], runtime_device: str) -> None:
         """Apply resource limits for PyTorch-based workers."""
         if cpu_threads > 0:
@@ -68,6 +75,23 @@ class MLIPWorker(abc.ABC):
                     device_index = 0
             torch_module.cuda.set_per_process_memory_fraction(cuda_memory_fraction, device=device_index)
 
+    def setup_torch_runtime(self, torch_module: Any) -> str:
+        """Resolve device and apply PyTorch-specific resource limits."""
+        runtime_device = self.resolve_torch_device(torch_module=torch_module, requested=self.device)
+        self.apply_torch_limits(
+            torch_module=torch_module,
+            cpu_threads=self.cpu_threads,
+            cuda_memory_fraction=self.cuda_memory_fraction,
+            runtime_device=runtime_device,
+        )
+        self._torch = torch_module
+        return runtime_device
+
+    @staticmethod
+    def torch_calculator_device(runtime_device: str) -> str:
+        """Return the device form expected by ASE-style torch calculators."""
+        return "cuda" if runtime_device.startswith("cuda") else "cpu"
+
 
 ################################################################################
 #
@@ -79,7 +103,7 @@ class MLIPWorker(abc.ABC):
 #
 ################################################################################
 
-class TorchMDNetWorker(MLIPWorker):
+class TorchMDNetWorker(TorchBackedMLIPWorker):
     KJ_TO_KCAL = 1.0 / 4.184
     ATOMTYPES = {
         "Br": 1,
@@ -103,15 +127,7 @@ class TorchMDNetWorker(MLIPWorker):
         import torch
         from torchmdnet.models.model import load_model
 
-        runtime_device = self.resolve_torch_device(torch_module=torch, requested=self.device)
-        self.apply_torch_limits(
-            torch_module=torch,
-            cpu_threads=self.cpu_threads,
-            cuda_memory_fraction=self.cuda_memory_fraction,
-            runtime_device=runtime_device,
-        )
-
-        self._torch = torch
+        runtime_device = self.setup_torch_runtime(torch)
         self._runtime_device = torch.device(runtime_device)
         self._model = load_model(self.model_path, derivative=not self.sp_only)
         self._model = self._model.to(self._runtime_device)
@@ -172,67 +188,79 @@ class TorchMDNetWorker(MLIPWorker):
 #
 # AIMNET2 worker for Aimnet2 models
 #
-# Status: Fails
+# Status: Works (not tested with gradients and gpu)
 #
 # Notes:
+# - TODO: Add support for electrostatic switches
+# - We have to reinitialize the calculator for each structure (their bug)
+# - UserWarning: State dict mismatch during model loading. Unexpected keys: ['outputs.dipole.mass', 'outputs.quadrupole.mass']
+#   self.model, metadata = load_model(p, device=self.device)
 #
 ################################################################################
 
-class AimnetWorker(MLIPWorker):
+class AimnetWorker(TorchBackedMLIPWorker):
     def load(self) -> None:
         import ase.units
         import torch
-        from aimnet.calculators import AIMNet2Calculator
 
-        # torch_device = self.resolve_torch_device(torch_module=torch, requested=self.device)
-        # self.apply_torch_limits(
-        #     torch_module=torch,
-        #     cpu_threads=self.cpu_threads,
-        #     cuda_memory_fraction=self.cuda_memory_fraction,
-        #     runtime_device=torch_device,
-        # )
-        # runtime_device = "cuda" if torch_device.startswith("cuda") else "cpu"
+        torch_device = self.setup_torch_runtime(torch)
 
-        self._dsf = 0
-        #self._runtime_device = runtime_device
-        self._predictor = AIMNet2Calculator(self.model_path)
+        self._electrostatics = None # "dsf" or "ewald" or None to disable long-range electrostatics
+        self._runtime_device = self.torch_calculator_device(torch_device)
+        self._aimnet_predict_eager = torch.compiler.disable(recursive=True, reason="AIMNet eager-only workaround")(self._aimnet_predict)
         self._ev_to_kcal = ase.units.mol / ase.units.kcal
 
-    def _pybel2data(self, mol, charge):
-        import numpy as np
+    def _get_predictor(self, model_name: str) -> Any:
+        from aimnet.calculators import AIMNet2Calculator
 
-        coord = np.array([a.coords for a in mol.atoms])
-        numbers = np.array([a.atomicnum for a in mol.atoms])
-        data = {}
-        data['coord'] =  coord
-        data['numbers'] = numbers
-        data['charge'] = charge
-        return data
+        calc = AIMNet2Calculator(
+            model=model_name,
+            device=self._runtime_device,
+            compile_model=False
+        )
+        self._configure_electrostatics(calc, self._electrostatics)
+
+        return calc
+
+    def _configure_electrostatics(self, calc: Any, config: Optional[str]) -> None:
+        if config is None:
+            return
+        if config.lower() == "dsf":
+            # Damped-Shifted Force (DSF) - recommended for periodic systems
+            calc.set_lrcoulomb_method("dsf", cutoff=15.0, dsf_alpha=0.2)
+        if config.lower() == "ewald":
+            # Ewald summation - for accurate periodic electrostatics
+            calc.set_lrcoulomb_method("ewald", ewald_accuracy=1e-8)
+
+    def _aimnet_predict(self, calc, data, gradients):
+        return calc(data, forces=gradients, stress=False, hessian=False)
 
     def calculate(self, xyz: str, gradients: bool, charge: int) -> Dict[str, Any]:
-        from openbabel import pybel
-        
-        # Read molecule
-        geostr = xyz.rstrip() + '\n'
-        mol = pybel.readstring('xyz', geostr)
+        import ase.io
+        import numpy as np
 
-        # Set charge
-        data = self._pybel2data(mol, charge)
+        # Read molecule
+        atoms = ase.io.read(io.StringIO(xyz), format="xyz", index=0)
+
+        # Set data and charge
+        data = {
+            "coord": np.asarray(atoms.positions, dtype=np.float64),
+            "numbers": np.asarray(atoms.numbers, dtype=np.int64),
+            "charge": float(charge),
+        }
 
         # Add calculator
-        calc = self._predictor
-
-        # Damped shifted DSF electrostatics
-        if self._dsf == 1:
-            calc.set_lrcoulomb_method('dsf', cutoff=15.0, dsf_alpha=0.2)
+        calc = self._get_predictor(self.model_path)
 
         # Calculate
-        results = calc(data, forces=False, stress=False, hessian=False)
-        energy_kcal = float(results['energy'] * self._ev_to_kcal)
+        with self._torch.compiler.set_stance("force_eager"):
+            results = self._aimnet_predict_eager(calc, data, gradients)
+
+        energy_kcal = float(results["energy"] * self._ev_to_kcal)
         payload: Dict[str, Any] = {"energy": energy_kcal, "forces": None}
 
         if gradients:
-            forces = results['forces'] * self._ev_to_kcal
+            forces = results["forces"] * self._ev_to_kcal
             payload["forces"] = forces.tolist()
 
         return payload
@@ -254,22 +282,14 @@ class AimnetWorker(MLIPWorker):
 #
 ################################################################################
 
-class FairchemWorker(MLIPWorker):
+class FairchemWorker(TorchBackedMLIPWorker):
     def load(self) -> None:
         import ase.units
         import torch
         from fairchem.core import FAIRChemCalculator, pretrained_mlip
 
-        torch_device = self.resolve_torch_device(torch_module=torch, requested=self.device)
-        self.apply_torch_limits(
-            torch_module=torch,
-            cpu_threads=self.cpu_threads,
-            cuda_memory_fraction=self.cuda_memory_fraction,
-            runtime_device=torch_device,
-        )
-        runtime_device = "cuda" if torch_device.startswith("cuda") else "cpu"
-
-        self._runtime_device = runtime_device
+        torch_device = self.setup_torch_runtime(torch)
+        self._runtime_device = self.torch_calculator_device(torch_device)
         self._predictor = pretrained_mlip.load_predict_unit(self.model_path, device=self._runtime_device)
         self._calculator_cls = FAIRChemCalculator
         self._ev_to_kcal = ase.units.mol / ase.units.kcal
@@ -349,35 +369,41 @@ class FennolWorker(MLIPWorker):
 #
 # MACE worker for MACE models
 #
-# Status: Fails (not tested with gradients and gpu)
+# Status: Works (not tested with gradients and gpu)
 #
 # Notes:
-# - FIXME: Worker broken on devices with low number of CPU cores - my guess is that MACE codebase has bugs
 # - TODO: Add precision flag / or kwargs for all worker types to handle this in a more generic way
-# - TODO: Add support for -off and -anicc MACE models
+# - TODO: Add support for -anicc MACE models
+# - Very memory hungry due to cluster expansion (ig)
+# - Higher number of CPUs and memory recommended
 #
 ################################################################################
 
-class MACEWorker(MLIPWorker):
+class MACEWorker(TorchBackedMLIPWorker):
     def load(self) -> None:
         import ase.units
         import torch
-        import mace
-        from mace.calculators import MACECalculator, mace_polar, mace_off, mace_anicc
 
-        torch_device = self.resolve_torch_device(torch_module=torch, requested=self.device)
-        self.apply_torch_limits(
-            torch_module=torch,
-            cpu_threads=self.cpu_threads,
-            cuda_memory_fraction=self.cuda_memory_fraction,
-            runtime_device=torch_device,
-        )
-        runtime_device = "cuda" if torch_device.startswith("cuda") else "cpu"
-
-        self._runtime_device = runtime_device
-        self._predictor = mace_polar(model=self.model_path, device=self._runtime_device) #, return_raw_model=True, default_dtype=self.precision)
+        torch_device = self.setup_torch_runtime(torch)
+        self._runtime_device = self.torch_calculator_device(torch_device)
+        self._predictor = self._get_predictor(self.model_path)
         self._ev_to_kcal = ase.units.mol / ase.units.kcal
-        print(f"Loaded MACE model on {self._runtime_device} device")
+
+    def _get_predictor(self, model_name: str) -> Any:
+        import mace
+        from mace.calculators import MACECalculator
+        from mace.calculators import mace_polar, mace_off, mace_anicc, mace_omol, mace_mp
+
+        if "polar" in model_name:
+            return mace_polar(model=model_name, device=self._runtime_device) #, return_raw_model=True, default_dtype=self.precision)
+        elif "off" in model_name: # TODO: Better to make it in a more generic way (in elif model_name ends with .model we know it is a path)
+            return MACECalculator(model_paths=model_name, device=self._runtime_device) # mace_off(model=model_name, device=self._runtime_device)
+        elif "anicc" in model_name:
+            return mace_anicc(model=model_name, device=self._runtime_device)
+        elif "omol" in model_name:
+            return mace_omol(model="extra_large", device=self._runtime_device)
+        else:
+            raise ValueError(f"Model name {model_name} does not match any known MACE model type")
 
     def calculate(self, xyz: str, gradients: bool, charge: int) -> Dict[str, Any]:
         import ase.io
@@ -390,7 +416,6 @@ class MACEWorker(MLIPWorker):
         
         # Add calculator
         atoms.calc = self._predictor
-        print("Calculating energy and forces with MACE model...")
 
         # Calculate
         energy_kcal = float(atoms.get_potential_energy() * self._ev_to_kcal)
@@ -410,7 +435,6 @@ class MACEWorker(MLIPWorker):
 # Status: Works (not tested with gradients and gpu)
 #
 # Notes:
-# - TODO: Add torch device handling and torch limits like in fairchem worker
 # - FIXME: Doesn't work with zmq
 #
 # If you have several graphs, batch them like so:
@@ -420,12 +444,14 @@ class MACEWorker(MLIPWorker):
 #
 ################################################################################
 
-class OrbitalWorker(MLIPWorker):
+class OrbitalWorker(TorchBackedMLIPWorker):
     def load(self) -> None:
         import ase.units
+        import torch
         from orb_models.forcefield.inference.calculator import ORBCalculator
         from orb_models.common.utils import seed_everything
 
+        self._runtime_device = self.setup_torch_runtime(torch)
         self._predictor, self._atoms_adapter = self._get_predictor(self.model_path, precision="float32-high") # or "float32-highest" / "float64 
         seed_everything(42)
         self._calculator_cls = ORBCalculator
@@ -435,15 +461,15 @@ class OrbitalWorker(MLIPWorker):
         from orb_models.forcefield import pretrained
 
         if model_name == "orb-v3-conservative-omol":
-            return pretrained.orb_v3_conservative_omol(device=self.device, precision=precision)
+            return pretrained.orb_v3_conservative_omol(device=self._runtime_device, precision=precision)
         elif model_name == "orb-v3-direct-omol":
-            return pretrained.orb_v3_direct_omol(device=self.device, precision=precision)
+            return pretrained.orb_v3_direct_omol(device=self._runtime_device, precision=precision)
         else:
             # Fallback for materials if you really intended to use them, but warn the user
             print(f"Warning: Loading generic/material model {model_name}. Charge might be ignored.")
             # Try to load it dynamically if it exists in pretrained
             if hasattr(pretrained, model_name.replace("-", "_")):
-                return getattr(pretrained, model_name.replace("-", "_"))(device=self.device, precision=precision)
+                return getattr(pretrained, model_name.replace("-", "_"))(device=self._runtime_device, precision=precision)
             else:
                 raise ValueError(f"Model {model_name} not found.")
 
@@ -457,7 +483,7 @@ class OrbitalWorker(MLIPWorker):
         atoms.info.update({"charge": charge, "spin": 1}) #, "external_field": [0.0, 0.0, 0.0]})
 
         # Add calculator
-        atoms.calc = self._calculator_cls(self._predictor, atoms_adapter=self._atoms_adapter, device=self.device)
+        atoms.calc = self._calculator_cls(self._predictor, atoms_adapter=self._atoms_adapter, device=self._runtime_device)
 
         # Calculate
         energy_kcal = float(atoms.get_potential_energy() * self._ev_to_kcal)
@@ -548,12 +574,13 @@ class So3lrWorker(MLIPWorker):
     def load(self) -> None:
         import ase.units
         import numpy as np
-        from so3lr import So3lrCalculator
 
         self._predictor = self._get_predictor(None, precision=np.float64)
         self._ev_to_kcal = ase.units.mol / ase.units.kcal
 
-    def _get_predictor(self, model_name: str, precision: Any) -> Any:
+    def _get_predictor(self, model_name: Optional[str], precision: Any) -> Any:
+        from so3lr import So3lrCalculator
+
         return So3lrCalculator(
             calculate_stress=False,
             dtype=precision,
@@ -595,9 +622,13 @@ class So3lrWorker(MLIPWorker):
 #
 ################################################################################
 
-class NequipWorker(MLIPWorker):
+class NequipWorker(TorchBackedMLIPWorker):
     def load(self) -> None:
         import ase.units
+        import torch
+
+        self._runtime_device = self.setup_torch_runtime(torch)
+
         import cuequivariance_torch
         from nequip.integrations.ase import NequIPCalculator
 
@@ -609,7 +640,7 @@ class NequipWorker(MLIPWorker):
     def _get_predictor(self, model_name: str) -> Any:
         return self._calculator_cls.from_compiled_model(
             compile_path=model_name,
-            device=self.device,
+            device=self._runtime_device,
             chemical_species_to_atom_type_map=True  # identity mapping (or mapping e.g. {"H": "H+", "C": "C_sp3", "O": "O-"})
         )
 
