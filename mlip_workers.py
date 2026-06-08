@@ -664,7 +664,10 @@ class NequipWorker(TorchBackedMLIPWorker):
         payload: Dict[str, Any] = {"energy": energy_kcal, "forces": None}
 
         if gradients:
-            forces = atoms.get_forces() * self._ev_to_kcal
+            if "mir-group" in self.model_path:
+                forces = atoms.get_forces() * self._ev_to_kcal
+            else:
+                forces = atoms.get_forces() * self._kj_to_kcal
             payload["forces"] = forces.tolist()
 
         return payload
