@@ -1,4 +1,5 @@
 """A collection of MLIP worker implementations for different backends."""
+from __future__ import annotations
 
 import abc
 import io
@@ -394,13 +395,15 @@ class MACEWorker(TorchBackedMLIPWorker):
         from mace.calculators import MACECalculator
         from mace.calculators import mace_polar, mace_off, mace_anicc, mace_omol, mace_mp
 
-        if "polar" in model_name:
+        if model_name.endswith(".model"): # when downloaded .model files are used
+            return MACECalculator(model_paths=model_name, device=self._runtime_device)
+        elif "polar" in model_name:
             return mace_polar(model=model_name, device=self._runtime_device) #, return_raw_model=True, default_dtype=self.precision)
-        elif "off" in model_name: # TODO: Better to make it in a more generic way (in elif model_name ends with .model we know it is a path)
-            return MACECalculator(model_paths=model_name, device=self._runtime_device) # mace_off(model=model_name, device=self._runtime_device)
+        elif "off" in model_name:
+            return mace_off(model=model_name, device=self._runtime_device)
         elif "anicc" in model_name:
             return mace_anicc(model=model_name, device=self._runtime_device)
-        elif "omol" in model_name:
+        elif "omol" in model_name: # extra_large by default
             return mace_omol(model="extra_large", device=self._runtime_device)
         else:
             raise ValueError(f"Model name {model_name} does not match any known MACE model type")
@@ -413,7 +416,7 @@ class MACEWorker(TorchBackedMLIPWorker):
 
         # Set charge
         atoms.info.update({"charge": charge, "spin": 1}) #, "external_field": [0.0, 0.0, 0.0]})
-        
+
         # Add calculator
         atoms.calc = self._predictor
 
@@ -668,6 +671,322 @@ class NequipWorker(TorchBackedMLIPWorker):
                 forces = atoms.get_forces() * self._ev_to_kcal
             else:
                 forces = atoms.get_forces() * self._kj_to_kcal
+            payload["forces"] = forces.tolist()
+
+        return payload
+
+
+################################################################################
+#
+# UBIO worker for UBio-MolFM models
+#
+# Status: Works (not tested with gradients and gpu)
+#
+# Notes:
+#   - Config of the model should be in the same folder as model weights named "config.yaml"
+#   - the config is static - if triton with cuda is used, need to modify config
+#   - Needed to create a conda var of molfm since it is not on pip
+#   - Uses less cpus even if given more
+#   - Periodic boundaries in example calculations (here unset)
+#   - Charge agnostic model, trained ONLY on NEUTRAL data
+#
+################################################################################
+
+class UBioWorker(TorchBackedMLIPWorker):
+    def load(self) -> None:
+        import ase.units
+        import torch
+
+        self._runtime_device = self.setup_torch_runtime(torch)
+
+        from molfm.interface.ase.calculator.e2former_calculator import E2FormerCalculator
+
+        self._calculator_cls = E2FormerCalculator
+        self._predictor = self._get_predictor(self.model_path)
+        self._ev_to_kcal = ase.units.mol / ase.units.kcal
+
+    def _get_predictor(self, model_name: str) -> Any:
+        return self._calculator_cls(
+            checkpoint_path=model_name, # "ubio-molfm-v1.5/molfm-v1p5-stage-3.pt", # molfm-v1p5-stage-3.pt, molfm-v1-stage-3.pt
+            config_name="config.yaml",
+            head_name="omol25",
+            device=self._runtime_device,
+            use_faiss=False,
+            use_tf32=False, # TODO
+            use_compile=False,
+        )
+
+    def calculate(self, xyz: str, gradients: bool, charge: int) -> Dict[str, Any]:
+        import ase.io
+
+        # Read molecule
+        atoms = ase.io.read(io.StringIO(xyz), format="xyz", index=0)
+        # atoms.set_cell([50.0, 50.0, 50.0])
+        # atoms.center(vacuum=15) # vacuum = 15
+        # atoms.pbc = [False, False, False] # periodic boundary conditions (defaultly [True, True, True])
+
+        # Set charge
+        # atoms.info.update({"charge": charge, "spin": 1})
+
+        # Add calculator
+        atoms.calc = self._predictor
+
+        # Calculate
+        energy_kcal = float(atoms.get_potential_energy() * self._ev_to_kcal)
+        payload: Dict[str, Any] = {"energy": energy_kcal, "forces": None}
+
+        if gradients:
+            forces = atoms.get_forces() * self._ev_to_kcal
+            payload["forces"] = forces.tolist()
+
+        return payload
+
+
+################################################################################
+#
+# AMP worker
+#
+# Status: Works for neutral gas-phase single-point energies and forces
+#
+# Notes: Uses AMP-BMS utilities.Helpers.build_graph for point calculations
+# - The AMP repository structure must be preserved in order to find the PARAMETERS_MIN.yaml file relative to the model path
+#
+################################################################################
+
+class AMPWorker(TorchBackedMLIPWorker):
+    PERIODIC_TABLE = {
+        "H": 1, "He": 2, "Li": 3, "Be": 4, "B": 5, "C": 6, "N": 7, "O": 8,
+        "F": 9, "Ne": 10, "Na": 11, "Mg": 12, "Al": 13, "Si": 14, "P": 15,
+        "S": 16, "Cl": 17, "Ar": 18, "K": 19, "Ca": 20, "Br": 35, "I": 53
+    }
+
+    def load(self) -> None:
+        import ase.units
+        import torch
+        import os
+
+        from utilities.Helpers import load_parameters
+        from utilities.Helpers import build_graph
+        from datastructures.Graphs import Graph
+
+        self._runtime_device = self.setup_torch_runtime(torch)
+        self._torch_device = torch.device(self._runtime_device)
+        self._build_graph = build_graph
+        self._graph_cls = Graph
+
+        # go two levels up to find the default config path relative to the model path # FIXME
+        default_config_path = os.path.join(os.path.dirname(os.path.dirname(self.model_path)), "parameters", "PARAMETERS_MIN.yaml")
+        self.config = load_parameters(default_config_path)
+        self.config["device_name"] = str(self._runtime_device)
+        self.config["device"] = self._torch_device
+        self._dtype = self.config.get("dtype", torch.get_default_dtype())
+
+        self._predictor = self._get_predictor(self.model_path)
+
+        self.cutoff = float(self.config.get("cutoff", 5.0))
+        self.cutoff_esp = float(self.config.get("cutoff_esp", 14.0))
+        self.cutoff_qmmm_esp = float(self.config.get("cutoff_qmmm_esp", 500.0))
+        self.cutoff_qmmm_pol = float(self.config.get("cutoff_qmmm_pol", 9.0))
+        self.node_size = int(self.config.get("node_size", 128))
+        self.n_channels = int(self.config.get("n_channels", 32))
+
+        self._kj_to_kcal = ase.units.kJ / ase.units.kcal
+
+    def _get_predictor(self, model_name: str) -> Any:
+        from amp.AMP import AMP
+
+        predictor = AMP(config=self.config)
+        state_dict = self._torch.load(model_name, map_location=self._torch_device, weights_only=False)
+        predictor.load_state_dict(state_dict)
+        predictor.to(self._torch_device)
+        predictor.eval()
+        return predictor
+
+    def _parse_xyz(self, xyz: str) -> Tuple[torch.Tensor, torch.Tensor]:
+        lines = xyz.strip().splitlines()
+        if len(lines) < 2:
+            raise ValueError("Invalid XYZ payload")
+
+        try:
+            n_atoms = int(lines[0].strip())
+        except ValueError as exc:
+            raise ValueError("Invalid XYZ atom count") from exc
+
+        if len(lines) < 2 + n_atoms:
+            raise ValueError("XYZ payload missing atom coordinates")
+
+        atom_lines = lines[2 : 2 + n_atoms]
+        symbols, coords = [], []
+        for line_number, line in enumerate(atom_lines, start=3):
+            parts = line.split()
+            if len(parts) < 4:
+                raise ValueError(f"Invalid XYZ atom line {line_number}")
+
+            symbol = parts[0].capitalize()
+            if symbol not in self.PERIODIC_TABLE:
+                raise ValueError(f"Element '{parts[0]}' is not supported by AMP")
+
+            try:
+                xyz_coords = [float(value) for value in parts[1:4]]
+            except ValueError as exc:
+                raise ValueError(f"Invalid coordinate on XYZ atom line {line_number}") from exc
+
+            symbols.append(symbol)
+            coords.append(xyz_coords)
+
+        z = self._torch.tensor(
+            [self.PERIODIC_TABLE[symbol] for symbol in symbols],
+            dtype=self._torch.long,
+            device=self._torch_device,
+        )
+        coords_qm = self._torch.tensor(
+            coords,
+            dtype=self._dtype,
+            device=self._torch_device,
+        )
+        return z, coords_qm
+
+    def _build_gas_phase_graph(self, z: torch.Tensor, coords_qm: torch.Tensor, charge: int) -> Any:
+        if charge == 0:
+            coords_qm_batched = coords_qm.unsqueeze(0)
+            coords_mm = self._torch.empty((1, 0, 3), dtype=coords_qm.dtype, device=self._torch_device)
+            charges_mm = self._torch.empty((1, 0), dtype=coords_qm.dtype, device=self._torch_device)
+            return self._build_graph(
+                Z=z,
+                coords_qm=coords_qm_batched,
+                coords_mm=coords_mm,
+                charges_mm=charges_mm,
+                mol_charge=charge, # FIXME: Doesn't work with non-zero charge for some reason
+                cutoff=self.cutoff,
+                cutoff_esp=self.cutoff_esp,
+                cutoff_qmmm_esp=self.cutoff_qmmm_esp,
+                cutoff_qmmm_pol=self.cutoff_qmmm_pol,
+                n_channels=self.n_channels,
+            )
+
+        # Ensure z is 1D and coords_qm is 2D (N, 3) for distance computation
+        z = z.squeeze()
+        coords_qm_2d = coords_qm.squeeze(0) if coords_qm.dim() == 3 else coords_qm
+        coords_qm_batched = coords_qm_2d.unsqueeze(0)
+
+        n_nodes = z.size(0)
+
+        diff = coords_qm_2d.unsqueeze(0) - coords_qm_2d.unsqueeze(1)
+        dist = self._torch.norm(diff, dim=-1)
+
+        # 1. Short-range QM graph (r < cutoff)
+        mask_qm = (dist < self.cutoff) & (dist > 1.0e-6)
+        senders, receivers = self._torch.where(mask_qm)
+        r1 = dist[mask_qm].unsqueeze(-1)
+        r2 = self._torch.square(r1)
+
+        diff_qm = coords_qm_2d[receivers] - coords_qm_2d[senders]
+        rx1_2d = diff_qm / self._torch.clamp(r1, min=1.0e-8)
+        rx1 = rx1_2d.unsqueeze(1)
+        rx2 = (rx1_2d.unsqueeze(-1) * rx1_2d.unsqueeze(-2)).unsqueeze(1)
+
+        # 2. Long-range electrostatic graph:
+        # - MUST enforce dist >= self.cutoff to prevent bonded pairs causing a polarization catastrophe
+        # - In gas phase, expand cutoff_esp to 1000.0 A so 1/r monopole terms are not truncated
+        cutoff_esp = max(float(self.cutoff_esp), 1000.0)
+        mask_esp = (dist >= self.cutoff) & (dist < cutoff_esp)
+        senders_esp, receivers_esp = self._torch.where(mask_esp)
+        r1_esp = dist[mask_esp].unsqueeze(-1)
+        r2_esp = self._torch.square(r1_esp)
+        batch_index_esp = self._torch.zeros(
+            senders_esp.size(0),
+            dtype=self._torch.long,
+            device=self._torch_device,
+        )
+
+        # 3. Nodes must receive Z (atomic numbers), matching Graphs.py / build_graph
+        nodes = z
+        md_mode = False
+
+        mol_charge = self._torch.tensor([charge], dtype=coords_qm.dtype, device=self._torch_device)
+        mol_size = self._torch.tensor([n_nodes], dtype=self._torch.long, device=self._torch_device)
+
+        # 4. Dummy MM buffers to satisfy TorchScript without contributing electrostatic energy
+        mm_monos_esp = self._torch.zeros((1, 1), dtype=coords_qm.dtype, device=self._torch_device)
+        mm_monos_pol = self._torch.zeros((1, 1), dtype=coords_qm.dtype, device=self._torch_device)
+        r1_qmmm_esp = self._torch.tensor([[5.0]], dtype=coords_qm.dtype, device=self._torch_device)
+        rx1_qmmm_esp = self._torch.tensor([[0.0, 0.0, 1.0]], dtype=coords_qm.dtype, device=self._torch_device)
+        rx2_qmmm_esp = self._torch.zeros((1, 3, 3), dtype=coords_qm.dtype, device=self._torch_device)
+        receivers_qmmm_esp = self._torch.zeros((1,), dtype=self._torch.long, device=self._torch_device)
+        qm_indices_qmmm_esp = self._torch.zeros((1,), dtype=self._torch.long, device=self._torch_device)
+        r1_qmmm_pol = self._torch.tensor([[5.0]], dtype=coords_qm.dtype, device=self._torch_device)
+        rx1_qmmm_pol = self._torch.tensor([[0.0, 0.0, 1.0]], dtype=coords_qm.dtype, device=self._torch_device)
+        rx2_qmmm_pol = self._torch.zeros((1, 3, 3), dtype=coords_qm.dtype, device=self._torch_device)
+        receivers_qmmm_pol = self._torch.zeros((1,), dtype=self._torch.long, device=self._torch_device)
+
+        graph = self._graph_cls(
+            z,
+            nodes,
+            coords_qm=coords_qm_batched,
+            mm_monos_esp=mm_monos_esp,
+            mm_monos_pol=mm_monos_pol,
+            mol_charge=mol_charge,
+            mol_size=mol_size,
+            R1=r1,
+            R2=r2,
+            Rx1=rx1,
+            Rx2=rx2,
+            senders=senders,
+            receivers=receivers,
+            R1_esp=r1_esp,
+            R2_esp=r2_esp,
+            senders_esp=senders_esp,
+            receivers_esp=receivers_esp,
+            batch_index_esp=batch_index_esp,
+            R1_qmmm_esp=r1_qmmm_esp,
+            Rx1_qmmm_esp=rx1_qmmm_esp,
+            Rx2_qmmm_esp=rx2_qmmm_esp,
+            receivers_qmmm_esp=receivers_qmmm_esp,
+            qm_indices_qmmm_esp=qm_indices_qmmm_esp,
+            R1_qmmm_pol=r1_qmmm_pol,
+            Rx1_qmmm_pol=rx1_qmmm_pol,
+            Rx2_qmmm_pol=rx2_qmmm_pol,
+            receivers_qmmm_pol=receivers_qmmm_pol,
+            md_mode=md_mode,
+            n_channels=self.n_channels,
+        )
+        graph.n_nodes = n_nodes
+        graph.dipos = self._torch.zeros((n_nodes, self.n_channels, 3), dtype=coords_qm.dtype, device=self._torch_device)
+        graph.quads = self._torch.zeros((n_nodes, self.n_channels, 3, 3), dtype=coords_qm.dtype, device=self._torch_device)
+        graph.dipos_qmmm = self._torch.zeros((n_nodes, 3), dtype=coords_qm.dtype, device=self._torch_device)
+        graph.quads_qmmm = self._torch.zeros((n_nodes, 3, 3), dtype=coords_qm.dtype, device=self._torch_device)
+        return graph
+
+    def calculate(self, xyz: str, gradients: bool, charge: int) -> Dict[str, Any]:
+        mol_charge = 0 if charge is None else int(charge)
+        z, coords_qm = self._parse_xyz(xyz)
+
+        if gradients:
+            coords_qm.requires_grad_(True)
+
+        graph = self._build_gas_phase_graph(z=z, coords_qm=coords_qm, charge=mol_charge)
+
+        if gradients:
+            with self._torch.enable_grad():
+                out = self._predictor(graph)
+                force_tensor = -self._torch.autograd.grad(
+                    out.V_total,
+                    coords_qm,
+                    grad_outputs=self._torch.ones_like(out.V_total),
+                    allow_unused=True,
+                )[0]
+                if force_tensor is None:
+                    force_tensor = self._torch.zeros_like(coords_qm)
+        else:
+            with self._torch.no_grad():
+                out = self._predictor(graph)
+            force_tensor = None
+
+        energy_kcal = float(out.V_total.detach().cpu().reshape(-1)[0]) * self._kj_to_kcal
+        payload: Dict[str, Any] = {"energy": energy_kcal, "forces": None}
+
+        if force_tensor is not None:
+            forces = force_tensor.detach().cpu().reshape(-1, 3) * self._kj_to_kcal
             payload["forces"] = forces.tolist()
 
         return payload

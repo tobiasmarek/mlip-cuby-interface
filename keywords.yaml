@@ -18,6 +18,8 @@ keywords:
       - :so3lr
       - :nequip
       - :aimnet
+      - :ubio
+      - :amp
   #: MLIP backend to use
 
   :mlip_model: !ruby/object:SettingsKeyword

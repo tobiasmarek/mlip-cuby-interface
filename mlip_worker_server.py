@@ -22,6 +22,8 @@ from mlip_workers import ( # TODO: Import dynamically
     So3lrWorker,
     NequipWorker,
     AimnetWorker,
+    UBioWorker,
+    AMPWorker,
 )
 
 WORKER_CLASSES = { # TODO: Build dynamically
@@ -34,6 +36,8 @@ WORKER_CLASSES = { # TODO: Build dynamically
     "so3lr": So3lrWorker,
     "nequip": NequipWorker,
     "aimnet": AimnetWorker,
+    "ubio": UBioWorker,
+    "amp": AMPWorker,
 }
 
 
