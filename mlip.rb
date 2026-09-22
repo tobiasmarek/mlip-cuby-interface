@@ -61,6 +61,7 @@ module InterfaceMlip
 
 		begin
 			@@mlip_worker_id = Process.spawn(mlip_worker_env, *mlip_worker_command)
+			mlip_wait_for_worker_port
 			mlip_start_bridge
 			mlip_wait_for_worker
 		rescue
@@ -137,6 +138,25 @@ module InterfaceMlip
 			rescue IOError
 			end
 		end
+	end
+
+	def mlip_wait_for_worker_port
+		600.times do
+			if Process.waitpid(@@mlip_worker_id, Process::WNOHANG)
+				@@mlip_worker_id = nil
+				Cuby::error "MLIP interface: Worker exited during startup"
+			end
+
+			begin
+				socket = TCPSocket.new("127.0.0.1", @@mlip_port)
+				socket.close
+				return
+			rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH, Errno::ETIMEDOUT
+				sleep(0.5)
+			end
+		end
+
+		Cuby::error "MLIP interface: Worker did not open port #{@@mlip_port}"
 	end
 
 	def mlip_wait_for_worker

@@ -1,7 +1,7 @@
 ## TL;DR
 
 ### Keywords:
-- `zmq` is not fully functional yet - but should be faster than http
+- `zmq` untested - but should be faster than http
 
 
 ### Backends:
