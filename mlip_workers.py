@@ -746,7 +746,8 @@ class UBioWorker(TorchBackedMLIPWorker):
 #
 # AMP worker
 #
-# Status: Works for neutral gas-phase single-point energies and forces
+# Status: Works for gas-phase single-point energies and forces, but fails for capped h-h structures
+#           Heuristic which fixes that is to set USE_MIN_H_H_DISTANCE = True and MIN_H_H_DISTANCE = 0.7
 #
 # Notes: Uses AMP-BMS utilities.Helpers.build_graph for point calculations
 # - The AMP repository structure must be preserved in order to find the PARAMETERS_MIN.yaml file relative to the model path
@@ -754,6 +755,9 @@ class UBioWorker(TorchBackedMLIPWorker):
 ################################################################################
 
 class AMPWorker(TorchBackedMLIPWorker):
+    USE_MIN_H_H_DISTANCE = False
+    MIN_H_H_DISTANCE = 0.7
+
     PERIODIC_TABLE = {
         "H": 1, "He": 2, "Li": 3, "Be": 4, "B": 5, "C": 6, "N": 7, "O": 8,
         "F": 9, "Ne": 10, "Na": 11, "Mg": 12, "Al": 13, "Si": 14, "P": 15,
@@ -767,12 +771,10 @@ class AMPWorker(TorchBackedMLIPWorker):
 
         from utilities.Helpers import load_parameters
         from utilities.Helpers import build_graph
-        from datastructures.Graphs import Graph
 
         self._runtime_device = self.setup_torch_runtime(torch)
         self._torch_device = torch.device(self._runtime_device)
         self._build_graph = build_graph
-        self._graph_cls = Graph
 
         # go two levels up to find the default config path relative to the model path # FIXME
         default_config_path = os.path.join(os.path.dirname(os.path.dirname(self.model_path)), "parameters", "PARAMETERS_MIN.yaml")
@@ -847,114 +849,32 @@ class AMPWorker(TorchBackedMLIPWorker):
         return z, coords_qm
 
     def _build_gas_phase_graph(self, z: torch.Tensor, coords_qm: torch.Tensor, charge: int) -> Any:
-        if charge == 0:
-            coords_qm_batched = coords_qm.unsqueeze(0)
-            coords_mm = self._torch.empty((1, 0, 3), dtype=coords_qm.dtype, device=self._torch_device)
-            charges_mm = self._torch.empty((1, 0), dtype=coords_qm.dtype, device=self._torch_device)
-            return self._build_graph(
-                Z=z,
-                coords_qm=coords_qm_batched,
-                coords_mm=coords_mm,
-                charges_mm=charges_mm,
-                mol_charge=charge, # FIXME: Doesn't work with non-zero charge for some reason
-                cutoff=self.cutoff,
-                cutoff_esp=self.cutoff_esp,
-                cutoff_qmmm_esp=self.cutoff_qmmm_esp,
-                cutoff_qmmm_pol=self.cutoff_qmmm_pol,
-                n_channels=self.n_channels,
-            )
-
-        # Ensure z is 1D and coords_qm is 2D (N, 3) for distance computation
-        z = z.squeeze()
-        coords_qm_2d = coords_qm.squeeze(0) if coords_qm.dim() == 3 else coords_qm
-        coords_qm_batched = coords_qm_2d.unsqueeze(0)
-
-        n_nodes = z.size(0)
-
-        diff = coords_qm_2d.unsqueeze(0) - coords_qm_2d.unsqueeze(1)
-        dist = self._torch.norm(diff, dim=-1)
-
-        # 1. Short-range QM graph (r < cutoff)
-        mask_qm = (dist < self.cutoff) & (dist > 1.0e-6)
-        senders, receivers = self._torch.where(mask_qm)
-        r1 = dist[mask_qm].unsqueeze(-1)
-        r2 = self._torch.square(r1)
-
-        diff_qm = coords_qm_2d[receivers] - coords_qm_2d[senders]
-        rx1_2d = diff_qm / self._torch.clamp(r1, min=1.0e-8)
-        rx1 = rx1_2d.unsqueeze(1)
-        rx2 = (rx1_2d.unsqueeze(-1) * rx1_2d.unsqueeze(-2)).unsqueeze(1)
-
-        # 2. Long-range electrostatic graph:
-        # - MUST enforce dist >= self.cutoff to prevent bonded pairs causing a polarization catastrophe
-        # - In gas phase, expand cutoff_esp to 1000.0 A so 1/r monopole terms are not truncated
-        cutoff_esp = max(float(self.cutoff_esp), 1000.0)
-        mask_esp = (dist >= self.cutoff) & (dist < cutoff_esp)
-        senders_esp, receivers_esp = self._torch.where(mask_esp)
-        r1_esp = dist[mask_esp].unsqueeze(-1)
-        r2_esp = self._torch.square(r1_esp)
-        batch_index_esp = self._torch.zeros(
-            senders_esp.size(0),
-            dtype=self._torch.long,
-            device=self._torch_device,
-        )
-
-        # 3. Nodes must receive Z (atomic numbers), matching Graphs.py / build_graph
-        nodes = z
-        md_mode = False
-
-        mol_charge = self._torch.tensor([charge], dtype=coords_qm.dtype, device=self._torch_device)
-        mol_size = self._torch.tensor([n_nodes], dtype=self._torch.long, device=self._torch_device)
-
-        # 4. Dummy MM buffers to satisfy TorchScript without contributing electrostatic energy
-        mm_monos_esp = self._torch.zeros((1, 1), dtype=coords_qm.dtype, device=self._torch_device)
-        mm_monos_pol = self._torch.zeros((1, 1), dtype=coords_qm.dtype, device=self._torch_device)
-        r1_qmmm_esp = self._torch.tensor([[5.0]], dtype=coords_qm.dtype, device=self._torch_device)
-        rx1_qmmm_esp = self._torch.tensor([[0.0, 0.0, 1.0]], dtype=coords_qm.dtype, device=self._torch_device)
-        rx2_qmmm_esp = self._torch.zeros((1, 3, 3), dtype=coords_qm.dtype, device=self._torch_device)
-        receivers_qmmm_esp = self._torch.zeros((1,), dtype=self._torch.long, device=self._torch_device)
-        qm_indices_qmmm_esp = self._torch.zeros((1,), dtype=self._torch.long, device=self._torch_device)
-        r1_qmmm_pol = self._torch.tensor([[5.0]], dtype=coords_qm.dtype, device=self._torch_device)
-        rx1_qmmm_pol = self._torch.tensor([[0.0, 0.0, 1.0]], dtype=coords_qm.dtype, device=self._torch_device)
-        rx2_qmmm_pol = self._torch.zeros((1, 3, 3), dtype=coords_qm.dtype, device=self._torch_device)
-        receivers_qmmm_pol = self._torch.zeros((1,), dtype=self._torch.long, device=self._torch_device)
-
-        graph = self._graph_cls(
-            z,
-            nodes,
+        coords_qm_batched = coords_qm.unsqueeze(0)
+        coords_mm = self._torch.empty((1, 0, 3), dtype=coords_qm.dtype, device=self._torch_device)
+        charges_mm = self._torch.empty((1, 0), dtype=coords_qm.dtype, device=self._torch_device)
+        graph = self._build_graph(
+            Z=z,
             coords_qm=coords_qm_batched,
-            mm_monos_esp=mm_monos_esp,
-            mm_monos_pol=mm_monos_pol,
-            mol_charge=mol_charge,
-            mol_size=mol_size,
-            R1=r1,
-            R2=r2,
-            Rx1=rx1,
-            Rx2=rx2,
-            senders=senders,
-            receivers=receivers,
-            R1_esp=r1_esp,
-            R2_esp=r2_esp,
-            senders_esp=senders_esp,
-            receivers_esp=receivers_esp,
-            batch_index_esp=batch_index_esp,
-            R1_qmmm_esp=r1_qmmm_esp,
-            Rx1_qmmm_esp=rx1_qmmm_esp,
-            Rx2_qmmm_esp=rx2_qmmm_esp,
-            receivers_qmmm_esp=receivers_qmmm_esp,
-            qm_indices_qmmm_esp=qm_indices_qmmm_esp,
-            R1_qmmm_pol=r1_qmmm_pol,
-            Rx1_qmmm_pol=rx1_qmmm_pol,
-            Rx2_qmmm_pol=rx2_qmmm_pol,
-            receivers_qmmm_pol=receivers_qmmm_pol,
-            md_mode=md_mode,
+            coords_mm=coords_mm,
+            charges_mm=charges_mm,
+            mol_charge=charge,
+            cutoff=self.cutoff,
+            cutoff_esp=self.cutoff_esp,
+            cutoff_qmmm_esp=self.cutoff_qmmm_esp,
+            cutoff_qmmm_pol=self.cutoff_qmmm_pol,
             n_channels=self.n_channels,
         )
-        graph.n_nodes = n_nodes
-        graph.dipos = self._torch.zeros((n_nodes, self.n_channels, 3), dtype=coords_qm.dtype, device=self._torch_device)
-        graph.quads = self._torch.zeros((n_nodes, self.n_channels, 3, 3), dtype=coords_qm.dtype, device=self._torch_device)
-        graph.dipos_qmmm = self._torch.zeros((n_nodes, 3), dtype=coords_qm.dtype, device=self._torch_device)
-        graph.quads_qmmm = self._torch.zeros((n_nodes, 3, 3), dtype=coords_qm.dtype, device=self._torch_device)
+
+        if self.USE_MIN_H_H_DISTANCE:
+            # Some fragment datasets place link hydrogens unusually close to
+            # one another. Optionally exclude those pairs from AMP's singular
+            # local Bessel messages while retaining the original long-range
+            # electrostatic, dispersion, and repulsion interactions.
+            h_h_edge = (z[graph.senders] == 1) & (z[graph.receivers] == 1)
+            keep_edge = ~(h_h_edge & (graph.R1[:, 0] < self.MIN_H_H_DISTANCE))
+            for attribute in ("R1", "R2", "Rx1", "Rx2", "senders", "receivers"):
+                setattr(graph, attribute, getattr(graph, attribute)[keep_edge])
+
         return graph
 
     def calculate(self, xyz: str, gradients: bool, charge: int) -> Dict[str, Any]:
