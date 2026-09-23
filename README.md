@@ -33,17 +33,19 @@ mlip_cpu_threads: 8
 
 ## Supported backends
 
-| Backend  | Models tested          | Status                      |
-|----------|------------------------|-----------------------------|
-| aimnet   | AIMNet2(2025)          | :white_check_mark: working  |
-| fairchem | UMA models             | :white_check_mark: working  |
-| fennol   | FeNNix-BIO1 models     | :white_check_mark: working  |
-| mace     | MACE-POLAR-1 models    | :white_check_mark: working  |
-| mlatom   | AIQM2, AIQM3           | :x: failing                 |
-| nequip   | NequIP, Allegro models | :white_check_mark: working  |
-| orbital  | ORB-V3 series          | :white_check_mark: working  |
-| so3lr    | SO3LR                  | :warning: untested          |
-| torchmd  | PM6-ML                 | :white_check_mark: working  |
+| Backend  | Models tested          | Status                       |
+|----------|------------------------|------------------------------|
+| amp      | AMP-BMS                | :warning: capped H-H failure |
+| aimnet   | AIMNet2(2025)          | :white_check_mark: working   |
+| fairchem | UMA models             | :white_check_mark: working   |
+| fennol   | FeNNix-BIO1 models     | :white_check_mark: working   |
+| mace     | MACE-POLAR-1 models    | :white_check_mark: working   |
+| mlatom   | AIQM2, AIQM3           | :x: failing                  |
+| nequip   | NequIP, Allegro models | :white_check_mark: working   |
+| orbital  | ORB-V3 series          | :white_check_mark: working   |
+| so3lr    | SO3LR                  | :warning: untested           |
+| torchmd  | PM6-ML                 | :white_check_mark: working   |
+| ubio     | UBio-MolFM             | :white_check_mark: working   |
 
 ## Files
 
@@ -68,16 +70,14 @@ Ruby (`mlip.rb`) acts only as a manager:
 
 ## Adding a new backend
 
-1) Within [`mlip_workers.py`](mlip_workers.py) define a new child class of the MLIPWorker abstract class
+1. In [`mlip_workers.py`](mlip_workers.py), define a concrete subclass of `MLIPWorker`. PyTorch-based workers should inherit from `TorchBackedMLIPWorker`.
 
-2) Implement the *load* method which handles the loading of the model and preparing it for inference
+2. Name the class `<Backend>Worker` or `<Backend>NetWorker`. The server discovers concrete worker classes automatically and derives the lowercase backend name from the class name.
 
-3) Implement the *calculate* method which takes an XYZ string, a gradients flag, and an optional charge, and returns a dictionary with "energy" and optionally "forces"
+3. Implement `load`, which loads the model and prepares it for inference, and `calculate`, which accepts an XYZ string, a gradients flag, and a charge and returns a dictionary containing `energy` and optionally `forces`.
 
-4) Use the *resolve_torch_device* and *apply_torch_limits* static methods from MLIPWorker for PyTorch-based workers to handle device selection and resource limits
+4. For PyTorch-based workers, use `setup_torch_runtime` from `TorchBackedMLIPWorker` to configure the device and resource limits.
 
-5) Ensure that all workers return energy in *kcal/mol* and forces in *kcal/mol/Å* for consistency, use ase.units for unit conversions if needed
+5. Return energies in *kcal/mol* and forces in *kcal/mol/Å*. Use `ase.units` for unit conversions when needed.
 
-6) Add import to [`mlip_worker_server.py`](mlip_worker_server.py) and register the worker class in the WORKER_CLASSES dictionary
-
-7) Add the worker name to keywords.yaml
+6. Add the derived backend name to [`keywords.yaml`](keywords.yaml). No import or registry change in `mlip_worker_server.py` is required.

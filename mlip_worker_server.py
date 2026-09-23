@@ -4,6 +4,7 @@
 
 import abc
 import argparse
+import inspect
 import json
 import os
 import resource
@@ -11,38 +12,26 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
 
-from mlip_workers import ( # TODO: Import dynamically
-    MLIPWorker,
-    TorchMDNetWorker,
-    FairchemWorker,
-    FennolWorker,
-    MACEWorker,
-    OrbitalWorker,
-    MlatomWorker,
-    So3lrWorker,
-    NequipWorker,
-    AimnetWorker,
-    UBioWorker,
-    AMPWorker,
-)
+import mlip_workers
 
-WORKER_CLASSES = { # TODO: Build dynamically
-    "torchmd": TorchMDNetWorker,
-    "fairchem": FairchemWorker,
-    "fennol": FennolWorker,
-    "mace": MACEWorker,
-    "orbital": OrbitalWorker,
-    "mlatom": MlatomWorker,
-    "so3lr": So3lrWorker,
-    "nequip": NequipWorker,
-    "aimnet": AimnetWorker,
-    "ubio": UBioWorker,
-    "amp": AMPWorker,
+def _backend_name(worker_class: type[mlip_workers.MLIPWorker]) -> str:
+    """Derive a backend name from a concrete worker class name."""
+    class_name = worker_class.__name__
+    suffix = "NetWorker" if class_name.endswith("NetWorker") else "Worker"
+    return class_name.removesuffix(suffix).lower()
+
+
+WORKER_CLASSES: dict[str, type[mlip_workers.MLIPWorker]] = {
+    _backend_name(worker_class): worker_class
+    for _, worker_class in inspect.getmembers(mlip_workers, inspect.isclass)
+    if worker_class.__module__ == mlip_workers.__name__
+    and issubclass(worker_class, mlip_workers.MLIPWorker)
+    and not inspect.isabstract(worker_class)
 }
 
 
 class WorkerService:
-    def __init__(self, worker: MLIPWorker) -> None:
+    def __init__(self, worker: mlip_workers.MLIPWorker) -> None:
         self._worker = worker
         self._lock = threading.Lock()
 
@@ -154,7 +143,7 @@ def build_worker(
     sp_only: bool,
     cpu_threads: int,
     cuda_memory_fraction: Optional[float],
-) -> MLIPWorker:
+) -> mlip_workers.MLIPWorker:
     backend_name = backend.lower()
     
     return WORKER_CLASSES[backend_name](
