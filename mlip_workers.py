@@ -122,7 +122,7 @@ class TorchMDNetWorker(TorchBackedMLIPWorker):
         "O": 21,
         "P": 23,
         "S": 26,
-    }
+    } # FIXME: Move to new atom mapping
 
     def load(self) -> None:
         import torch
