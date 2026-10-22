@@ -519,7 +519,7 @@ class MlatomWorker(MLIPWorker):
         self._mlip_module = ml
         self._predictor_initialized = False
         self._predictor = self._get_predictor(self.model_path)
-        self._ev_to_kcal = ase.units.mol / ase.units.kcal
+        self._hartree_to_kcal = ase.units.Hartree / ase.units.kcal * ase.units.mol
 
     def _get_predictor(self, model_name: str, atoms: str = None) -> Any:
         if model_name == "uaiqm_optimal":
@@ -527,7 +527,7 @@ class MlatomWorker(MLIPWorker):
                 return
             predictor = self._mlip_module.models.uaiqm(method=model_name, verbose=False)
             predictor.warning=False # Suppress warnings
-            predictor.select_optimal(molecule=atoms) #,nCPUs=1,time_budget='1min')
+            predictor.select_optimal(molecule=atoms) #,nCPUs=1,time_budget='1min') # TODO
             self._predictor_initialized = True
         else:
             predictor = self._mlip_module.models.methods(method=model_name, baseline_kwargs={'etemp': 400}) # for PLA15 dataset (with big structs) 400 works without displace
@@ -550,13 +550,12 @@ class MlatomWorker(MLIPWorker):
             self._predictor = self._get_predictor(self.model_path, atoms=atoms)
 
         # Calculate
-        self._predictor.predict(molecule=atoms, calculate_energy=True, calculate_energy_gradients=False, calculate_hessian=False)
-        energy_kcal = float(atoms.energy * self._ev_to_kcal)
+        self._predictor.predict(molecule=atoms, calculate_energy=True, calculate_energy_gradients=gradients, calculate_hessian=False)
+        energy_kcal = float(atoms.energy * self._hartree_to_kcal)
         payload: Dict[str, Any] = {"energy": energy_kcal, "forces": None}
 
         if gradients:
-            self._predictor.predict(molecule=atoms, calculate_energy=False, calculate_energy_gradients=True, calculate_hessian=False)
-            forces = atoms.forces * self._ev_to_kcal # FIXME: Or atoms.gradients?
+            forces = -atoms.energy_gradients * self._hartree_to_kcal
             payload["forces"] = forces.tolist()
 
         return payload

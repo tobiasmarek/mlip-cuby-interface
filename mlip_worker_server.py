@@ -2,6 +2,8 @@
 
 """Unified persistent MLIP worker with pluggable transport and backend."""
 
+from __future__ import annotations
+
 import abc
 import argparse
 import inspect

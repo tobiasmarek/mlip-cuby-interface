@@ -40,7 +40,7 @@ mlip_cpu_threads: 8
 | fairchem | UMA models             | :white_check_mark: working   |
 | fennol   | FeNNix-BIO1 models     | :white_check_mark: working   |
 | mace     | MACE-POLAR-1 models    | :white_check_mark: working   |
-| mlatom   | AIQM2, AIQM3           | :x: failing                  |
+| mlatom   | AIQM2, AIQM3           | :white_check_mark: working   |
 | nequip   | NequIP, Allegro models | :white_check_mark: working   |
 | orbital  | ORB-V3 series          | :white_check_mark: working   |
 | so3lr    | SO3LR                  | :warning: untested           |
