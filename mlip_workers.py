@@ -217,7 +217,7 @@ class AimnetWorker(TorchBackedMLIPWorker):
         calc = AIMNet2Calculator(
             model=model_name,
             device=self._runtime_device,
-            compile_model=False
+            compile_model=False # TODO: maybe with compilation will then work for more structs at once?
         )
         self._configure_electrostatics(calc, self._electrostatics)
 
@@ -530,7 +530,14 @@ class MlatomWorker(MLIPWorker):
             predictor.select_optimal(molecule=atoms) #,nCPUs=1,time_budget='1min') # TODO
             self._predictor_initialized = True
         else:
-            predictor = self._mlip_module.models.methods(method=model_name, baseline_kwargs={'etemp': 400}) # for PLA15 dataset (with big structs) 400 works without displace
+            predictor = self._mlip_module.models.methods(
+                method=model_name,
+                baseline_kwargs={
+                    'etemp': 400,
+                    'unlimited_stack_size': True,
+                    'nthreads': self.cpu_threads
+                } # TODO: 'solvent': 'water' (maybe it is just for AIQM2)
+            ) # for PLA15 dataset (with big structs) 400 works without displace
             predictor.warning=False # Suppress warnings
             self._predictor_initialized = True
         return predictor
