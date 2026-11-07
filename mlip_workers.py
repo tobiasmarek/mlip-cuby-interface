@@ -291,7 +291,10 @@ class FairchemWorker(TorchBackedMLIPWorker):
 
         torch_device = self.setup_torch_runtime(torch)
         self._runtime_device = self.torch_calculator_device(torch_device)
-        self._predictor = pretrained_mlip.load_predict_unit(self.model_path, device=self._runtime_device)
+        if self.model_path.endswith(".ckpt") or self.model_path.endswith(".pt"):
+            self._predictor = pretrained_mlip.load_predict_unit(self.model_path, device=self._runtime_device)
+        else:
+            self._predictor = pretrained_mlip.get_predict_unit(self.model_path, device=self._runtime_device)
         self._calculator_cls = FAIRChemCalculator
         self._ev_to_kcal = ase.units.mol / ase.units.kcal
 
@@ -503,10 +506,10 @@ class OrbitalWorker(TorchBackedMLIPWorker):
 #
 # MLATOM worker for AIQM models
 #
-# Status: Fails (not tested with gradients and gpu)
+# Status: Works (not tested with gradients and gpu)
 #
 # Notes:
-# - FIXME: Fails to converge for some structures thx to semiempirics
+# - Fails to converge for some structures (more etemp or less acc helps)
 # - Needs Aitomic addon for AIQM3 access
 #
 ################################################################################
@@ -572,7 +575,7 @@ class MlatomWorker(MLIPWorker):
 #
 # SO3LR worker
 #
-# Status: Untested
+# Status: Works (not tested with gradients and gpu)
 #
 # Notes:
 #
@@ -583,14 +586,17 @@ class So3lrWorker(MLIPWorker):
     def load(self) -> None:
         import ase.units
         import numpy as np
+        import jax
+        jax.config.update("jax_enable_x64", True)
 
-        self._predictor = self._get_predictor(None, precision=np.float64)
+        self._precision = np.float64
         self._ev_to_kcal = ase.units.mol / ase.units.kcal
 
     def _get_predictor(self, model_name: Optional[str], precision: Any) -> Any:
         from so3lr import So3lrCalculator
 
         return So3lrCalculator(
+            model=model_name,
             calculate_stress=False,
             dtype=precision,
             lr_cutoff=1000.0,
@@ -601,13 +607,17 @@ class So3lrWorker(MLIPWorker):
         import ase.io
 
         # Read molecule
-        atoms = ase.io.read(io.StringIO(xyz), format="xyz", index=0)
+        graph_mode = "interaction_mode=fragment_charges" in xyz.splitlines()[1].split()
+        atoms = ase.io.read(io.StringIO(xyz), format="extxyz" if graph_mode else "xyz", index=0)
 
         # Set charge
         atoms.info.update({"charge": charge, "spin": 1})
+
+        if graph_mode:
+            return self._calculate_graph(atoms, gradients)
         
         # Add calculator
-        atoms.calc = self._predictor
+        atoms.calc = self._get_predictor(self.model_path, precision=self._precision)
 
         # Calculate
         energy_kcal = float(atoms.get_potential_energy() * self._ev_to_kcal)
@@ -618,6 +628,50 @@ class So3lrWorker(MLIPWorker):
             payload["forces"] = forces.tolist()
 
         return payload
+
+    def _calculate_graph(self, atoms: Any, gradients: bool) -> Dict[str, Any]:
+        import jax
+        import numpy as np
+        from so3lr.base_calculator import make_so3lr
+        from so3lr.mlff.data.dataloader_sparse_ase import ASE_to_jraph, selection_indices
+        from so3lr.mlff.utils.jraph_utils import dynamically_batch_with_lr, graph_to_batch_fn
+
+        atoms.info["multiplicity"] = 1
+        structure_type = atoms.info.get("structure_type")
+        if structure_type not in ("dimer_original", "dimer_translated"):
+            raise ValueError("SO3LR graph XYZ requires a dimer structure_type")
+        try:
+            idx_a = selection_indices(atoms.info["selection_a"])
+            idx_b = selection_indices(atoms.info["selection_b"])
+            charge_a = int(atoms.info["charge_a"])
+            charge_b = int(atoms.info["charge_b"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("SO3LR graph XYZ requires valid fragment selections and charges") from exc
+        if not len(idx_a) or not len(idx_b) or not np.array_equal(
+            np.sort(np.concatenate((idx_a, idx_b))), np.arange(len(atoms))
+        ):
+            raise ValueError("SO3LR fragment selections must partition all atoms")
+        if charge_a + charge_b != atoms.info["charge"]:
+            raise ValueError("SO3LR fragment charges do not sum to the total charge")
+
+        # Match the CLI's float64 geometry with a float32 model.
+        with jax.enable_x64(True):
+            if not hasattr(self, "_graph_predictor"):
+                self._graph_predictor = jax.jit(make_so3lr(
+                    model=self.model_path, precision=jax.numpy.float32,
+                    lr_cutoff=1000.0, dispersion_energy_cutoff_lr_damping=2.0
+                ))
+            graph, lr_data = ASE_to_jraph(atoms, cutoff=4.5, cutoff_lr=1000.0)
+            n = len(atoms)
+            batch, lr_batch = next(dynamically_batch_with_lr(
+                [(graph, lr_data)], n_node=n + 1, n_edge=len(graph.receivers) + 1,
+                n_graph=2, n_pairs=int(lr_data["n_pairs"][0]) + 1,
+            ))
+            output = jax.block_until_ready(self._graph_predictor(graph_to_batch_fn(batch, lr_batch)))
+            energy = float(output["energy"][0]) * self._ev_to_kcal
+            forces = np.asarray(output["forces"][:n]) * self._ev_to_kcal if gradients else None
+
+        return {"energy": energy, "forces": forces.tolist() if gradients else None}
 
 
 ################################################################################

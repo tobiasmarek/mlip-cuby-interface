@@ -43,9 +43,36 @@ mlip_cpu_threads: 8
 | mlatom   | AIQM2, AIQM3           | :white_check_mark: working   |
 | nequip   | NequIP, Allegro models | :white_check_mark: working   |
 | orbital  | ORB-V3 series          | :white_check_mark: working   |
-| so3lr    | SO3LR                  | :warning: untested           |
+| so3lr    | SO3LR                  | :white_check_mark: working   |
 | torchmd  | PM6-ML                 | :white_check_mark: working   |
 | ubio     | UBio-MolFM             | :white_check_mark: working   |
+
+## PLA15 interaction protocols
+
+These three jobs use the same MLIP worker settings; choose the interaction definition with the dataset and protocol:
+
+```yaml
+# E3 = E(PL) - E(P) - E(L), `job: interaction` by default
+job: dataset
+dataset: PLA15
+interface: mlip
+method: mlip
+mlip_backend: so3lr
+mlip_model: so3lr
+```
+
+```yaml
+# Ordinary E2 = E(PL) - E(P + displaced L), total charge only
+job: dataset
+dataset: PLA15
+calculation_overwrite:
+  job: interaction_displace
+  int_displace_dist: 1000          # Angstrom; default 1000
+interface: mlip
+method: mlip
+mlip_backend: so3lr
+mlip_model: so3lr
+```
 
 ## Files
 
